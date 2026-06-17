@@ -1,0 +1,5 @@
+/target
+/knowledge_index
+/knowledge_data
+Cargo.lock
+.DS_Store

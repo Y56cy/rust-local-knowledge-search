@@ -1,0 +1,12 @@
+pub mod analyzer;
+pub mod app;
+pub mod config;
+pub mod document;
+pub mod errors;
+pub mod highlighter;
+pub mod indexer;
+pub mod models;
+pub mod storage;
+pub mod tokenizer;
+pub mod tui;
+pub mod utils;

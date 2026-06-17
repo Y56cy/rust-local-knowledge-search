@@ -1,0 +1,1 @@
+Local Knowledge Search is designed as a single-person Rust course project. It demonstrates modules, structs, enums, traits from dependencies, Result-based error handling, file traversal, serialization, persistent local state and terminal UI.
