@@ -1,0 +1,7 @@
+2026-06-18 10:00:01 INFO Starting Rust search engine
+2026-06-18 10:00:02 DEBUG Loading documents from ./docs
+2026-06-18 10:00:03 INFO Indexing file: config.toml
+2026-06-18 10:00:04 INFO Indexing file: data.json
+2026-06-18 10:00:05 WARN Missing tokenizer for Chinese words
+2026-06-18 10:00:06 INFO Search completed successfully
+2026-06-18 10:00:07 INFO Query: rust -> 2 results

@@ -1,0 +1,14 @@
+title = "Rust Knowledge Search Test"
+version = "1.0"
+
+[database]
+engine = "tantivy"
+path = "./index"
+
+[search]
+language = "chinese"
+enable_tokenizer = true
+
+[author]
+name = "test_user"
+role = "student"

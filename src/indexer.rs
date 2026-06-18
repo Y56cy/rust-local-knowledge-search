@@ -1,4 +1,3 @@
-// ...existing code...
 use crate::config::AppConfig;
 use crate::document::DocumentLoader;
 use crate::highlighter::{count_query_matches, make_snippet};
@@ -9,11 +8,11 @@ use crate::storage::LocalStore;
 use crate::tokenizer::join_tokens;
 use anyhow::{Context, Result};
 use chrono::Utc;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, Value, STORED, TEXT};
+use tantivy::schema::{Field, Schema, Value, STORED, STRING, TEXT};
 use tantivy::{doc, Index, IndexWriter, TantivyDocument, Term};
 
 #[derive(Clone)]
@@ -21,6 +20,7 @@ pub struct KnowledgeIndex {
     index: Index,
     title: Field,
     path: Field,
+    path_exact: Option<Field>,
     extension: Field,
     content: Field,
     content_tokenized: Field,
@@ -62,6 +62,7 @@ impl KnowledgeIndex {
         let schema = index.schema();
         let title = schema.get_field("title")?;
         let path = schema.get_field("path")?;
+        let path_exact = schema.get_field("path_exact").ok();
         let extension = schema.get_field("extension")?;
         let content = schema.get_field("content")?;
         let content_tokenized = schema.get_field("content_tokenized")?;
@@ -71,6 +72,7 @@ impl KnowledgeIndex {
             index,
             title,
             path,
+            path_exact,
             extension,
             content,
             content_tokenized,
@@ -86,7 +88,8 @@ impl KnowledgeIndex {
         loader: &DocumentLoader,
         store: &LocalStore,
     ) -> Result<RebuildReport> {
-        let documents = loader.load_dir(docs_dir)?;
+        let report = loader.load_dir_report(docs_dir)?;
+        let documents = report.documents;
         let total_bytes = documents.iter().map(|d| d.bytes).sum();
         self.clear_and_add(&documents)?;
         let manifest = manifest_from_documents(&documents);
@@ -94,7 +97,7 @@ impl KnowledgeIndex {
         Ok(RebuildReport {
             indexed_documents: documents.len(),
             total_bytes,
-            skipped_documents: 0,
+            skipped_documents: report.skipped_documents,
         })
     }
 
@@ -108,6 +111,14 @@ impl KnowledgeIndex {
         let old_manifest = store.load_manifest()?;
         let mut changed = Vec::new();
         let mut unchanged = 0;
+        let current_paths: BTreeSet<PathBuf> = docs.iter().map(|doc| doc.path.clone()).collect();
+        let removed_paths: Vec<PathBuf> = old_manifest
+            .entries
+            .iter()
+            .filter(|entry| !current_paths.contains(&entry.path))
+            .map(|entry| entry.path.clone())
+            .collect();
+
         for doc in docs.iter() {
             if old_manifest.is_unchanged(doc) {
                 unchanged += 1;
@@ -115,11 +126,16 @@ impl KnowledgeIndex {
                 changed.push(doc.clone());
             }
         }
-        if !changed.is_empty() {
+
+        if self.path_exact.is_none() && (!changed.is_empty() || !removed_paths.is_empty()) {
+            self.clear_and_add(&docs)?;
+        } else if !changed.is_empty() || !removed_paths.is_empty() {
             let mut writer = self.index.writer(50_000_000)?;
+            for path in &removed_paths {
+                self.delete_path_with_writer(&mut writer, path);
+            }
             for doc in &changed {
-                let term = Term::from_field_text(self.path, &doc.path.to_string_lossy());
-                writer.delete_term(term);
+                self.delete_path_with_writer(&mut writer, &doc.path);
                 self.add_document_with_writer(&mut writer, doc)?;
             }
             writer.commit()?;
@@ -150,18 +166,27 @@ impl KnowledgeIndex {
         writer: &mut IndexWriter,
         d: &KnowledgeDocument,
     ) -> Result<()> {
-        // 将原始 content 存为 content 字段，同时把分词后的 tokenized 内容放入 content_tokenized 字段用于检索
         let tokenized = join_tokens(&d.content);
-        writer.add_document(doc!(
+        let mut document = doc!(
             self.title => d.title.clone(),
             self.path => d.path.to_string_lossy().to_string(),
             self.extension => d.extension.clone(),
-            self.content => d.content.clone(), // 存储原始文本以便 snippet/显示
+            self.content => d.content.clone(),
             self.content_tokenized => tokenized,
             self.bytes => d.bytes as i64,
             self.modified => d.modified.map(|m| m.to_rfc3339()).unwrap_or_default()
-        ))?;
+        );
+        if let Some(path_exact) = self.path_exact {
+            document.add_text(path_exact, d.path.to_string_lossy());
+        }
+        writer.add_document(document)?;
         Ok(())
+    }
+
+    fn delete_path_with_writer(&self, writer: &mut IndexWriter, path: &Path) {
+        let field = self.path_exact.unwrap_or(self.path);
+        let term = Term::from_field_text(field, &path.to_string_lossy());
+        writer.delete_term(term);
     }
 
     pub fn search(&self, query_text: &str, limit: usize) -> Result<Vec<SearchResult>> {
@@ -251,10 +276,9 @@ fn build_schema() -> Schema {
     let mut schema_builder = Schema::builder();
     schema_builder.add_text_field("title", TEXT | STORED);
     schema_builder.add_text_field("path", TEXT | STORED);
+    schema_builder.add_text_field("path_exact", STRING);
     schema_builder.add_text_field("extension", TEXT | STORED);
-    // 原始 content 用于存储/显示
     schema_builder.add_text_field("content", TEXT | STORED);
-    // 用于索引的分词后内容（不必 STORED）
     schema_builder.add_text_field("content_tokenized", TEXT);
     schema_builder.add_i64_field("bytes", STORED);
     schema_builder.add_text_field("modified", STORED);
@@ -313,17 +337,23 @@ mod tests {
     use crate::config::AppConfig;
     use crate::document::DocumentLoader;
     use std::fs;
+    use std::thread::sleep;
+    use std::time::Duration;
     use tempfile::tempdir;
 
-    #[test]
-    fn index_should_count_matches() -> Result<()> {
+    fn test_context() -> Result<(
+        tempfile::TempDir,
+        PathBuf,
+        AppConfig,
+        DocumentLoader,
+        LocalStore,
+        KnowledgeIndex,
+    )> {
         let dir = tempdir()?;
         let docs = dir.path().join("docs");
         let index_dir = dir.path().join("idx");
         let data_dir = dir.path().join("data");
         fs::create_dir_all(&docs)?;
-        fs::write(docs.join("a.md"), "# Rust\nRust ownership and borrowing")?;
-        fs::write(docs.join("b.md"), "# Search\nTantivy search in Rust")?;
         let cfg = AppConfig {
             docs_dir: docs.clone(),
             index_dir: index_dir.clone(),
@@ -333,6 +363,14 @@ mod tests {
         let loader = DocumentLoader::new(cfg.clone());
         let store = LocalStore::new(data_dir)?;
         let index = KnowledgeIndex::open_or_create(&index_dir, &cfg)?;
+        Ok((dir, docs, cfg, loader, store, index))
+    }
+
+    #[test]
+    fn index_should_count_matches() -> Result<()> {
+        let (_dir, docs, _cfg, loader, store, index) = test_context()?;
+        fs::write(docs.join("a.md"), "# Rust\nRust ownership and borrowing")?;
+        fs::write(docs.join("b.md"), "# Search\nTantivy search in Rust")?;
         index.rebuild_from_dir(&docs, &loader, &store)?;
         let (count, results) = index.search_with_count("Rust", 10)?;
         assert_eq!(count, 2);
@@ -342,25 +380,47 @@ mod tests {
 
     #[test]
     fn chinese_search_should_find() -> Result<()> {
-        let dir = tempdir()?;
-        let docs = dir.path().join("docs");
-        let index_dir = dir.path().join("idx");
-        let data_dir = dir.path().join("data");
-        fs::create_dir_all(&docs)?;
+        let (_dir, docs, _cfg, loader, store, index) = test_context()?;
         fs::write(docs.join("c.md"), "我爱自然语言处理和搜索")?;
-        let cfg = AppConfig {
-            docs_dir: docs.clone(),
-            index_dir: index_dir.clone(),
-            data_dir: data_dir.clone(),
-            ..AppConfig::default()
-        };
-        let loader = DocumentLoader::new(cfg.clone());
-        let store = LocalStore::new(data_dir)?;
-        let index = KnowledgeIndex::open_or_create(&index_dir, &cfg)?;
         index.rebuild_from_dir(&docs, &loader, &store)?;
         let (count, results) = index.search_with_count("自然语言", 10)?;
         assert!(count >= 1, "expected at least one match for Chinese query");
         assert!(!results.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_update_should_replace_changed_document() -> Result<()> {
+        let (_dir, docs, _cfg, loader, store, index) = test_context()?;
+        let doc_path = docs.join("a.md");
+        fs::write(&doc_path, "# First\nalpha oldword")?;
+        index.rebuild_from_dir(&docs, &loader, &store)?;
+
+        sleep(Duration::from_millis(20));
+        fs::write(&doc_path, "# First\nalpha newword")?;
+        index.incremental_update(&docs, &loader, &store)?;
+
+        let (old_count, old_results) = index.search_with_count("oldword", 10)?;
+        let (new_count, new_results) = index.search_with_count("newword", 10)?;
+        assert_eq!(old_count, 0);
+        assert!(old_results.is_empty());
+        assert_eq!(new_count, 1);
+        assert_eq!(new_results.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_update_should_remove_deleted_document() -> Result<()> {
+        let (_dir, docs, _cfg, loader, store, index) = test_context()?;
+        let doc_path = docs.join("a.md");
+        fs::write(&doc_path, "# Removed\nuniquedeletedterm")?;
+        index.rebuild_from_dir(&docs, &loader, &store)?;
+        fs::remove_file(&doc_path)?;
+        index.incremental_update(&docs, &loader, &store)?;
+
+        let (count, results) = index.search_with_count("uniquedeletedterm", 10)?;
+        assert_eq!(count, 0);
+        assert!(results.is_empty());
         Ok(())
     }
 }

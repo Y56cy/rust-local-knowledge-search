@@ -1,0 +1,21 @@
+{
+  "docs_dir": "./docs",
+  "index_dir": "./target/manual-test/index",
+  "data_dir": "./target/manual-test/data",
+  "max_file_bytes": 2097152,
+  "supported_extensions": [
+    "txt",
+    "md",
+    "rs",
+    "toml",
+    "json",
+    "csv",
+    "log",
+    "yaml",
+    "yml",
+    "docx",
+    "pdf"
+  ],
+  "default_limit": 10,
+  "snippet_chars": 160
+}

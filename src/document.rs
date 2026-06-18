@@ -2,13 +2,18 @@ use crate::config::AppConfig;
 use crate::errors::KnowledgeError;
 use crate::models::KnowledgeDocument;
 use crate::utils::{canonical_or_original, file_extension, file_modified_utc, safe_title};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub struct DocumentLoader {
     config: AppConfig,
+}
+
+pub struct DocumentLoadReport {
+    pub documents: Vec<KnowledgeDocument>,
+    pub skipped_documents: usize,
 }
 
 impl DocumentLoader {
@@ -50,18 +55,38 @@ impl DocumentLoader {
     }
 
     pub fn load_dir(&self, dir: &Path) -> Result<Vec<KnowledgeDocument>> {
+        Ok(self.load_dir_report(dir)?.documents)
+    }
+
+    pub fn load_dir_report(&self, dir: &Path) -> Result<DocumentLoadReport> {
+        if !dir.exists() {
+            bail!("document directory does not exist: {}", dir.display());
+        }
+        if !dir.is_dir() {
+            bail!("document path is not a directory: {}", dir.display());
+        }
+
         let mut docs = Vec::new();
-        for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+        let mut skipped_documents = 0;
+        for entry in WalkDir::new(dir) {
+            let entry = entry
+                .with_context(|| format!("failed to walk document directory: {}", dir.display()))?;
             let path = entry.path();
             if path.is_file() && self.is_supported_path(path) {
                 match self.load_one(path) {
                     Ok(doc) => docs.push(doc),
-                    Err(err) => eprintln!("skip {}: {}", path.display(), err),
+                    Err(err) => {
+                        skipped_documents += 1;
+                        eprintln!("skip {}: {}", path.display(), err);
+                    }
                 }
             }
         }
         docs.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(docs)
+        Ok(DocumentLoadReport {
+            documents: docs,
+            skipped_documents,
+        })
     }
 
     pub fn is_supported_path(&self, path: &Path) -> bool {
@@ -104,10 +129,22 @@ pub fn collect_supported_paths(dir: &Path, config: &AppConfig) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn extract_markdown_title() {
         assert_eq!(extract_title("# Hello\nbody"), Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn load_dir_should_error_when_directory_is_missing() {
+        let dir = tempdir().expect("tempdir");
+        let missing = dir.path().join("missing");
+        let loader = DocumentLoader::new(AppConfig::default());
+        let err = loader
+            .load_dir(&missing)
+            .expect_err("missing dir should fail");
+        assert!(err.to_string().contains("does not exist"));
     }
 }
 

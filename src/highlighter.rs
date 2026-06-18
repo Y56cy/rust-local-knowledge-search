@@ -1,4 +1,3 @@
-// ...existing code...
 use crate::models::truncate_chars;
 use crate::tokenizer::{contains_cjk, tokenize};
 use std::cmp::Reverse;
@@ -103,8 +102,6 @@ pub fn clean_for_terminal(text: &str, max_chars: usize) -> String {
     let clean = text.replace("**", "");
     truncate_chars(&clean, max_chars)
 }
-
-// ...existing tests and count_query_matches...
 
 #[cfg(test)]
 mod tests {

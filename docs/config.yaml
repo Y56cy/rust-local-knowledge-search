@@ -1,0 +1,17 @@
+app:
+  name: Rust Knowledge Search
+  version: 1.0
+
+search:
+  tokenizer: jieba
+  language: chinese
+  mode: full-text
+
+database:
+  type: tantivy
+  path: ./index
+
+features:
+  - indexing
+  - search
+  - ranking

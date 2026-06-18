@@ -1,0 +1,11 @@
+server:
+  host: 127.0.0.1
+  port: 8080
+
+search:
+  enable: true
+  language: chinese
+  tokenizer: default
+
+logging:
+  level: info
