@@ -1,4 +1,4 @@
-# Local Knowledge Search
+# 本地知识库搜索系统Local Knowledge Search
 
 一个用 Rust 实现的本地知识库搜索系统。项目可以扫描本地文档目录，抽取文本内容，使用 Tantivy 构建全文索引，并提供命令行和 TUI 两种使用方式。
 
